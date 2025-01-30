@@ -16,7 +16,8 @@ os.makedirs(ANNOTATED_FOLDER, exist_ok=True)
 @sio.on("sendtoAI")
 def sendtoAI(data):
     print("Received image file path:", data)
-    
+
+    data = os.path.abspath("testCouple.png")
     if os.path.exists(data):
         image = cv2.imread(data)
         if image is None:
