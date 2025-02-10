@@ -1,34 +1,70 @@
 import cv2
 import os
+import numpy as np
 import socketio
 import mediapipe as mp
 
-SERVER_URL = 'http://localhost:3000'
+SERVER_URL = 'http://localhost:3001'
 DETECTION_CONFIDENCE = 0.6
 ANNOTATED_FOLDER = "annotated_images"
+REMOVED_BG_FOLDER = "removed_bg_images"
 
 sio = socketio.Client()
 mp_face_detection = mp.solutions.face_detection
+mp_selfie_segmentation = mp.solutions.selfie_segmentation
 mp_drawing = mp.solutions.drawing_utils
 
 os.makedirs(ANNOTATED_FOLDER, exist_ok=True)
+os.makedirs(REMOVED_BG_FOLDER, exist_ok=True)
+
+def remove_background(image):
+    with mp_selfie_segmentation.SelfieSegmentation(model_selection=1) as segment:
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        result = segment.process(image_rgb)
+
+        mask = result.segmentation_mask
+
+        if mask is None:
+            print("Error: Segmentation mask is None")
+            return image
+        
+        threshold = 0.8
+        mask_3d = (mask > threshold).astype(np.uint8) * 255  # Convert to 255 scale
+        mask_3d = cv2.cvtColor(mask_3d, cv2.COLOR_GRAY2BGR)
+
+        # Convert image to BGRA
+        image_bgra = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+        image_bgra[:, :, 3] = mask_3d[:, :, 0]  # Apply mask to alpha channel
+
+        return image_bgra
 
 @sio.on("sendtoAI")
 def sendtoAI(data):
-    print("Received image file path:", data)
+    print("Received data: ", data)
+    imagePath = data.get('path')
+    max_results = data.get('max_results')
+
+    # imagePath = os.path.abspath("testremoved.png")
     
-    if os.path.exists(data):
-        image = cv2.imread(data)
+    if imagePath and isinstance(imagePath, str) and os.path.exists(imagePath):
+        print(f"Processing image: {imagePath}")
+        image = cv2.imread(imagePath, cv2.IMREAD_UNCHANGED)
         if image is None:
-            print(f"Failed to load image from {data}")
+            print(f"Failed to load image from {imagePath}")
             return
+        
+        image_no_bg = remove_background(image)
+        removed_bg_path = os.path.join(REMOVED_BG_FOLDER, f"removedBG_{os.path.basename(imagePath)}")
+        cv2.imwrite(removed_bg_path, image_no_bg, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+        full_removed_bg_path = os.path.abspath(removed_bg_path)
+        print(f"Background removed and saved to: {full_removed_bg_path}")
 
         with mp_face_detection.FaceDetection(min_detection_confidence=DETECTION_CONFIDENCE) as face_detector:
             results = face_detector.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
 
             keypoints_data_list = []
             if results.detections:
-                for face_id, face in enumerate(results.detections):
+                for face_id, face in enumerate(results.detections[:max_results]):
                     bounding_box = face.location_data.relative_bounding_box
                     width, height = image.shape[1], image.shape[0]
                     x = int(bounding_box.xmin * width)
@@ -55,16 +91,18 @@ def sendtoAI(data):
                             cv2.putText(image, text, (kp["x"] + 10, kp["y"] - 10),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-                output_path = os.path.join(ANNOTATED_FOLDER, f"annotated_{os.path.basename(data)}")
+                output_path = os.path.join(ANNOTATED_FOLDER, f"mark_green_{os.path.basename(imagePath)}")
                 cv2.imwrite(output_path, image)
                 full_output_path = os.path.abspath(output_path)
                 print(f"Annotated image saved to: {full_output_path}")
 
+                sio.emit('removedBGImage', full_removed_bg_path)
                 sio.emit('annotatedImage', full_output_path)
                 sio.emit('keypointsData', keypoints_data_list)
 
             else:
                 print("No faces detected.")
+                sio.emit('nfd', 'No faces detected.')
 
     else:
         print(f"Image file does not exist at: {data}")
